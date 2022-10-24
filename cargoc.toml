@@ -1,0 +1,15 @@
+[package]
+name = "main"
+outdir = "."
+src = ["test/"]
+typ = "bin"
+gen_config = true
+
+[compiler]
+includes = ["glfw/include"]
+flags = ["-g", "-Wall", "-Werror"]
+compiler = "clang"
+
+[linker]
+libs = ["glfw/glfw3dll.lib"]
+linker = "clang"
