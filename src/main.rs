@@ -169,6 +169,9 @@ struct Args {
     /// Specify library target
     #[arg(long)]
     lib: bool,
+    ///build with makefile instead of own config
+    #[arg(long)]
+    make: bool,
 }
 
 fn main() {

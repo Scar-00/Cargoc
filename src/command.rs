@@ -11,6 +11,8 @@ pub mod Command {
         path::{Path, PathBuf, MAIN_SEPARATOR},
     };
 
+    static SYSYEM_LIBS: &str = "-lshell32 -ladvapi32 -lcfgmgr32 -lcomctl32 -lcomdlg32 -ld2d1 -ldwrite -ldxgi.lgdi32 -lkernel32 -lmsimg32 -lole32 -lopengl32 -lshlwapi -luser32 -lwindowscodecs -lwinspool -luserenv -lws2_32 -lbcrypt -lmsvcrt -loleaut32 -luuid -lodbc32 -lodbccp32";
+
     #[derive(Debug)]
     pub struct Command {
         compiler: String,
@@ -53,6 +55,7 @@ pub mod Command {
         libs: Option<Vec<String>>,
         flags: Option<Vec<String>>,
         linker: Option<String>,
+        default_libs: Option<bool>,
     }
 
     impl Command {
@@ -397,6 +400,7 @@ pub mod Command {
                 Some(v) => command.linker_flags = v,
                 None => {}
             }
+            if let Some(v) = linker.default_libs {}
         }
 
         if config.dependencies.is_some() {
