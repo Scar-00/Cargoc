@@ -8,9 +8,10 @@ use std::{
 };
 #[allow(non_snake_case)]
 mod command;
+mod util;
 
 #[allow(non_camel_case_types)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum ProjType {
     bin = 0,
     dynlib = 1,
@@ -45,50 +46,6 @@ impl ProjType {
     }
 }
 
-fn try_resolve_dependency(path: PathBuf) {
-    match metadata(&path) {
-        Ok(fd) => {
-            if fd.is_file() {
-                println!("test");
-                return;
-            }
-
-            let path_as_string = path.as_path().to_str().unwrap();
-            let manifest_path = format!("{}/Cargoc.toml", path_as_string);
-            match metadata(&manifest_path) {
-                Ok(_) => {
-                    let cmd = Command::get(&manifest_path);
-                    println!("{:?}", cmd);
-                    println!("path -> {}", path_as_string);
-                    println!("out -> {}", cmd.get_out_file());
-                    let lib_file = format!("{}{}", path_as_string, cmd.get_out_file());
-                    println!("lib -> {}", lib_file);
-                    match metadata(&lib_file) {
-                        Ok(_) => {}
-                        Err(_) => {
-                            //build dependency
-                        }
-                    }
-                }
-                Err(_) => {
-                    println!(
-                        "Cannot resolve dependency '{}'; Cargoc.toml file not found",
-                        path_as_string
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-        Err(_) => {
-            println!(
-                "Could not find the path specified['{}']",
-                path.as_path().to_str().unwrap()
-            );
-            std::process::exit(1);
-        }
-    }
-}
-
 fn init_proj(name: &str, _bin: bool, lib: bool) {
     let path = format!("./{}", name);
 
@@ -114,7 +71,13 @@ fn init_proj(name: &str, _bin: bool, lib: bool) {
             let file_content = format!(
                 "[package]
 name = \"{}\"
-typ = \"{}\"",
+typ = \"{}\"
+
+[compiler]
+
+[linker]
+
+[dependencies]",
                 name, typ
             );
 

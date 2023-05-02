@@ -1,0 +1,10 @@
+[package]
+name = "test"
+typ = "bin"
+
+[compiler]
+
+[linker]
+
+[dependencies]
+lib = { path = "./lib" }

@@ -1,4 +1,5 @@
 pub mod Command {
+    use crate::util::util::{compose_path, IsOlder};
     use crate::ProjType;
     use libc::system;
     use path_absolutize::Absolutize;
@@ -6,24 +7,30 @@ pub mod Command {
     use serde::Deserialize;
     use std::{
         collections::HashMap,
-        fs::{metadata, read_dir, remove_file, File},
+        fs::{metadata, read_dir, remove_file, File, ReadDir},
         io::{Read, Write},
         path::{Path, PathBuf, MAIN_SEPARATOR},
     };
 
-    static SYSYEM_LIBS: &str = "-lshell32 -ladvapi32 -lcfgmgr32 -lcomctl32 -lcomdlg32 -ld2d1 -ldwrite -ldxgi.lgdi32 -lkernel32 -lmsimg32 -lole32 -lopengl32 -lshlwapi -luser32 -lwindowscodecs -lwinspool -luserenv -lws2_32 -lbcrypt -lmsvcrt -loleaut32 -luuid -lodbc32 -lodbccp32";
+    #[cfg(target_os = "windows")]
+    static SYSYEM_LIBS: &str = "-lshell32 -ladvapi32 -lcfgmgr32 -lcomctl32 -lcomdlg32 -ld2d1 -ldwrite -ldxgi -lgdi32 -lkernel32 -lmsimg32 -lole32 -lopengl32 -lshlwapi -luser32 -lwindowscodecs -lwinspool -luserenv -lws2_32 -lbcrypt -lmsvcrt -loleaut32 -luuid -lodbc32 -lodbccp32";
+
+    static BUILD_FILE: &str = "./build.cpp";
 
     #[derive(Debug)]
     pub struct Command {
+        dir: PathBuf,
         compiler: String,
         linker: String,
         linker_flags: Vec<String>,
         compiler_flags: Vec<String>,
         out_dir: String,
-        src: Vec<String>,
+        src: Vec<PathBuf>,
         name: String,
         typ: ProjType,
         gen_config: bool,
+        build_file: bool,
+        includes: Vec<PathBuf>,
     }
 
     #[derive(Deserialize)]
@@ -31,7 +38,20 @@ pub mod Command {
         package: Option<Package>,
         compiler: Option<Compiler>,
         linker: Option<Linker>,
-        dependencies: Option<HashMap<String, String>>,
+        dependencies: Option<HashMap<String, Dependency>>,
+        lib: Option<Lib>,
+    }
+
+    #[derive(Deserialize)]
+    struct Dependency {
+        path: Option<PathBuf>,
+        git: Option<String>,
+        version: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct Lib {
+        header: Vec<PathBuf>,
     }
 
     #[derive(Deserialize)]
@@ -41,6 +61,7 @@ pub mod Command {
         src: Option<Vec<String>>,
         typ: Option<String>,
         gen_config: Option<bool>,
+        collect_rec: Option<bool>,
     }
 
     #[derive(Deserialize)]
@@ -59,8 +80,9 @@ pub mod Command {
     }
 
     impl Command {
-        pub fn new() -> Command {
+        fn new() -> Command {
             let mut command = Command {
+                dir: PathBuf::new(),
                 compiler: String::from("clang"),
                 linker: String::from("clang"),
                 linker_flags: Vec::new(),
@@ -70,9 +92,11 @@ pub mod Command {
                 name: String::from("a"),
                 typ: ProjType::bin,
                 gen_config: false,
+                build_file: false,
+                includes: Vec::new(),
             };
 
-            command.src.push(String::from("src/main.c"));
+            command.src.push(PathBuf::from("src/main.c"));
 
             return command;
         }
@@ -80,6 +104,7 @@ pub mod Command {
         fn get_compile_command_for_file(&self, file: &mut PathBuf) -> String {
             let mut cmd = String::new();
             cmd.push_str(self.compiler.as_str());
+            //println!("{:?}", file);
             cmd.push_str(format!(" -c {}", file.to_str().unwrap()).as_str());
             file.set_extension("o");
             cmd.push_str(format!(" -o {}", file.to_str().unwrap()).as_str());
@@ -90,7 +115,21 @@ pub mod Command {
         }
 
         pub fn compile(&mut self) {
-            for file in &self.src {
+            let obj: Vec<PathBuf> = self
+                .src
+                .iter()
+                .map(|item| {
+                    let mut item = item.clone();
+                    item.set_extension("o");
+                    return item;
+                })
+                .collect();
+            for (i, file) in self.src.iter().enumerate() {
+                if obj[i].exists() {
+                    if file.is_older(&obj[i]).unwrap() {
+                        return;
+                    }
+                }
                 let cmd = std::ffi::CString::new(
                     self.get_compile_command_for_file(&mut PathBuf::from(file)),
                 )
@@ -104,17 +143,20 @@ pub mod Command {
 
         pub fn get_linker_command(&mut self) -> String {
             let mut cmd: String = String::new();
-            let file_ext = self.typ.get_file_ext();
             match self.typ {
                 ProjType::bin => cmd.push_str(self.linker.as_str()),
                 ProjType::dynlib => {
                     cmd.push_str(&self.linker.as_str());
-                    self.linker_flags.push(format!("-shared"));
+                    self.linker_flags.insert(0, format!("-shared"));
                 }
                 ProjType::staticlib => cmd.push_str("ar -rcs"),
             }
 
-            cmd.push_str(format!(" -o {}/{}.{}", self.out_dir, self.name, file_ext).as_str());
+            if self.typ != ProjType::staticlib {
+                cmd.push_str(format!(" -o {}", self.get_out_file()).as_str());
+            } else {
+                cmd.push_str(format!(" {}", self.get_out_file()).as_str());
+            }
 
             for src in &self.src {
                 let mut file_path = PathBuf::from(src);
@@ -155,37 +197,44 @@ pub mod Command {
                         );
                     }
 
-                    let path = Path::new(".");
-                    let mut buf = PathBuf::from(file.as_str());
+                    let path = self.dir.clone();
+                    let mut buf = file.clone();
                     buf.set_extension("o");
                     entries.push(format!(
                     "{{ \"directory\": \"{}\", \"file\": \"{}\", \"output\": \"{}\", \"arguments\": [\"{}\", {}] }}",
                     path.absolutize()
                         .unwrap()
                         .to_slash()
-                        .unwrap()
-                        .to_string()
-                        .as_str(),
-                    file.as_str(),
-                    buf.to_str().unwrap(),
+                        .unwrap(),
+                    file.to_slash().unwrap(),
+                    buf.to_slash().unwrap(),
                     self.compiler.as_str(),
                     args
                 ));
                 }
 
-                let path = format!("compile_commands.json");
-                match File::create(path) {
+                let path = compose_path(&self.dir, &PathBuf::from("compile_commands.json"));
+                match File::create(&path) {
                     Ok(mut fd) => {
-                        fd.write("[\n".as_bytes());
+                        fd.write("[\n".as_bytes()).expect(
+                            format!("Could not wirte to file `{}`", path.to_str().unwrap())
+                                .as_str(),
+                        );
 
                         for i in 0..entries.len() {
                             if i != entries.len() - 1 {
                                 entries[i].push(',');
                             }
-                            fd.write(entries[i].as_bytes());
+                            fd.write(entries[i].as_bytes()).expect(
+                                format!("Could not wirte to file `{}`", path.to_str().unwrap())
+                                    .as_str(),
+                            );
                         }
 
-                        fd.write("\n]".as_bytes());
+                        fd.write("\n]".as_bytes()).expect(
+                            format!("Could not wirte to file `{}`", path.to_str().unwrap())
+                                .as_str(),
+                        );
                     }
                     Err(e) => {
                         println!("Could not open file['{}']", e);
@@ -204,9 +253,8 @@ pub mod Command {
         pub fn run(&mut self) {
             self.build();
 
-            match self.typ {
-                ProjType::bin => {}
-                ProjType::dynlib | ProjType::staticlib => return,
+            if self.typ == ProjType::dynlib || self.typ == ProjType::staticlib {
+                return;
             }
 
             let programm = std::ffi::CString::new(
@@ -236,12 +284,10 @@ pub mod Command {
 
             let file_ext = self.typ.get_file_ext();
 
-            let mut exe = String::new();
-            if cfg!(windows) {
-                exe = format!("{}\\{}.{}", self.out_dir, self.name, file_ext);
-            } else if cfg!(unix) {
-                exe = format!("./{}/{}.{}", self.out_dir, self.name, file_ext);
-            }
+            let exe = format!(
+                "{}{}{}.{}",
+                self.out_dir, MAIN_SEPARATOR, self.name, file_ext
+            );
 
             match remove_file(exe.as_str()) {
                 Ok(_) => {
@@ -254,15 +300,95 @@ pub mod Command {
             }
         }
 
+        fn should_rebuild(&self) -> bool {
+            if !PathBuf::from(self.get_out_file()).exists() {
+                return true;
+            }
+            for file in &self.src {
+                if PathBuf::from(self.get_out_file()).is_older(file).unwrap() {
+                    return true;
+                }
+            }
+            false
+        }
+
         pub fn get_out_file(&self) -> String {
             return format!(
                 "{}{}{}.{}",
-                self.out_dir,
+                compose_path(&self.dir, &PathBuf::from(&self.out_dir))
+                    .to_str()
+                    .unwrap(),
                 MAIN_SEPARATOR,
                 self.name,
                 self.typ.get_file_ext()
             );
         }
+
+        fn resolve_dependency(&mut self, dep: &Dependency) {
+            if dep.git.is_some() && dep.path.is_some() {
+                println!("Cannot use path and git at the same time");
+                std::process::exit(1);
+            }
+            if dep.git.is_none() && dep.path.is_none() {
+                println!("Need either path or git in dependency");
+                std::process::exit(1);
+            }
+
+            if let Some(path) = &dep.path {
+                let cfg_path = compose_path(path, &PathBuf::from("cargoc.toml"));
+                if !cfg_path.exists() {
+                    println!(
+                        "{}",
+                        format!(
+                            "Invalid path to cargoc.toml `{}`",
+                            cfg_path.to_str().unwrap()
+                        )
+                    );
+                    std::process::exit(1);
+                }
+                let mut cmd = get(cfg_path.to_str().unwrap());
+                //println!("src = {:#?}", cmd.src);
+
+                if cmd.typ == ProjType::bin || cmd.includes.len() < 1 {
+                    println!("Cannot use non library project as a dependency and or need includes");
+                    std::process::exit(1);
+                }
+                if cmd.should_rebuild() {
+                    cmd.build();
+                }
+
+                //println!("includes -> {:#?}", cmd.includes);
+                for include in &cmd.includes {
+                    self.compiler_flags.push(format!(
+                        "-I{}",
+                        compose_path(path, include).to_slash().unwrap()
+                    ));
+                }
+                self.linker_flags.push(cmd.get_out_file());
+                //println!("compiler_flags -> {:#?}", self.compiler_flags);
+                //println!("linker_flags -> {:#?}", self.linker_flags);
+            }
+        }
+    }
+
+    fn dir_collect_files(dir: ReadDir, descend: bool) -> Result<Vec<PathBuf>, std::io::Error> {
+        let mut src_files = Vec::<PathBuf>::new();
+        for file in dir {
+            let file = file?.path();
+            if file.is_file() {
+                match file.extension().unwrap().to_str().unwrap() {
+                    "c" | "cpp" | "cxx" | "c++" => {
+                        src_files.push(file);
+                    }
+                    _ => {}
+                }
+            } else if descend {
+                let sub_dir = read_dir(file).unwrap();
+                src_files.append(&mut dir_collect_files(sub_dir, descend)?);
+            }
+        }
+
+        return Ok(src_files);
     }
 
     pub fn get(file: &str) -> Command {
@@ -276,139 +402,126 @@ pub mod Command {
 
         let mut command: Command = Command::new();
 
-        if config.package.is_some() {
-            let package: Package = config.package.unwrap();
-            match package.typ {
-                Some(v) => {
-                    command.typ = ProjType::get(v);
-                }
-                None => {}
+        let dir = Path::new(file).parent();
+
+        if let Some(package) = &config.package {
+            if let Some(dir) = dir {
+                command.dir = dir.to_path_buf();
             }
 
-            match package.name {
-                Some(v) => {
-                    command.name = v;
-                }
-                None => {}
+            if let Some(typ) = &package.typ {
+                command.typ = ProjType::get(typ.clone());
             }
-            match package.outdir {
-                Some(v) => {
-                    command.out_dir = v;
-                }
-                None => {}
-            }
-            match package.src {
-                Some(v) => {
-                    command.src.pop();
-                    for file in v {
-                        //check for dir
-                        //let md = metadata(&file).unwrap();
-                        match metadata(&file) {
-                            Ok(md) => {
-                                if md.is_file() {
-                                    let path = Path::new(&file);
-                                    match path.extension().unwrap().to_str().unwrap() {
-                                        "c" | "cpp" | "cxx" | "c++" => {
-                                            command.src.push(file.to_string());
-                                        }
-                                        "h" | "hpp" | "o" | "obj" | "exe" | "out" => {}
-                                        x => {
-                                            panic!("unknown file type -> '{}'", x)
-                                        }
-                                    }
-                                } else {
-                                    let files = read_dir(file).unwrap();
 
-                                    for file in files {
-                                        let name = file.unwrap().path().display().to_string();
-                                        let path = Path::new(&name);
-                                        if path.is_dir() {
-                                            //maybe traverse path recursevely
-                                            continue;
-                                        }
-                                        match path.extension().unwrap().to_str().unwrap() {
-                                            "c" | "cpp" | "cxx" | "c++" => {
-                                                command.src.push(name);
-                                            }
-                                            "h" | "hpp" | "o" | "obj" | "exe" | "out" => {}
-                                            x => {
-                                                panic!("unknown file type -> '{}'", x)
-                                            }
-                                        }
+            if let Some(name) = &package.name {
+                command.name = name.clone();
+            }
+
+            if let Some(dir) = &package.outdir {
+                command.out_dir = dir.clone();
+            }
+
+            if let Some(src) = &package.src {
+                command.src.pop();
+                for file in src {
+                    let path = compose_path(&command.dir, &PathBuf::from(file));
+                    match path.metadata() {
+                        Ok(md) => {
+                            if md.is_file() {
+                                match path.extension().unwrap().to_str().unwrap() {
+                                    "c" | "cpp" | "cxx" | "c++" => {
+                                        command.src.push(path.to_path_buf());
                                     }
+                                    _ => {}
                                 }
+                            } else {
+                                let dir = read_dir(path).unwrap();
+                                command.src.append(
+                                    &mut dir_collect_files(
+                                        dir,
+                                        package.collect_rec.unwrap_or(false),
+                                    )
+                                    .expect("Could not read dir"),
+                                );
                             }
-                            Err(_) => {
-                                println!("Could not find the path specified['{}']", file);
-                                std::process::exit(1);
-                            }
+                        }
+                        Err(_) => {
+                            println!("Could not find the path specified['{}']", file);
+                            std::process::exit(1);
                         }
                     }
                 }
-                None => {}
             }
-            match package.gen_config {
-                Some(v) => {
-                    command.gen_config = v;
-                }
-                None => {}
+            if let Some(cfg) = package.gen_config {
+                command.gen_config = cfg;
             }
         }
 
-        if config.compiler.is_some() {
-            let compiler: Compiler = config.compiler.unwrap();
-
-            match compiler.compiler {
-                Some(v) => {
-                    command.compiler = v;
-                }
-                None => {}
+        if let Some(compiler) = &config.compiler {
+            if let Some(compiler) = &compiler.compiler {
+                command.compiler = compiler.clone();
             }
-            match compiler.flags {
-                Some(v) => {
-                    for flag in v {
-                        command.compiler_flags.push(flag);
-                    }
+            if let Some(flags) = &compiler.flags {
+                for flag in flags {
+                    command.compiler_flags.push(flag.clone());
                 }
-                None => {}
             }
-            match compiler.includes {
-                Some(v) => {
-                    for include in v {
-                        command.compiler_flags.push(format!("-I{}", include));
-                    }
+            if let Some(includes) = &compiler.includes {
+                for include in includes {
+                    command.compiler_flags.push(format!(
+                        "-I{}",
+                        compose_path(&command.dir, &PathBuf::from(include))
+                            .to_str()
+                            .unwrap()
+                    ));
                 }
-                None => {}
             }
         }
 
-        if config.linker.is_some() {
-            let linker: Linker = config.linker.unwrap();
-            match linker.linker {
-                Some(v) => command.linker = v,
-                None => {}
+        if let Some(linker) = &config.linker {
+            if let Some(linker) = &linker.linker {
+                command.linker = linker.clone();
             }
-            match linker.flags {
-                Some(v) => {
-                    for flag in v {
-                        command.linker_flags.push(flag);
-                    }
+            if let Some(flags) = &linker.flags {
+                for flag in flags {
+                    command.linker_flags.push(flag.clone());
                 }
-                None => {}
             }
-            match linker.libs {
-                Some(v) => command.linker_flags = v,
-                None => {}
+            if let Some(libs) = &linker.libs {
+                for lib in libs {
+                    command.linker_flags.push(
+                        compose_path(&command.dir, &PathBuf::from(lib))
+                            .to_str()
+                            .unwrap()
+                            .to_string(),
+                    );
+                }
             }
-            if let Some(v) = linker.default_libs {}
+            if let Some(v) = linker.default_libs {
+                if v {
+                    command.linker_flags.append(
+                        &mut SYSYEM_LIBS
+                            .split_whitespace()
+                            .map(|item| item.to_string())
+                            .collect(),
+                    );
+                }
+            }
         }
 
-        if config.dependencies.is_some() {
-            let dependencies = config.dependencies.unwrap();
-            for value in dependencies {
-                //println!("value -> {}", value.1);
-                crate::try_resolve_dependency(PathBuf::from(value.1));
+        if let Some(dependencies) = &config.dependencies {
+            for (name, content) in dependencies {
+                //println!("name -> {name}");
+                command.resolve_dependency(content);
             }
+        }
+
+        if let Some(lib) = &config.lib {
+            command.includes = lib.header.clone();
+        }
+
+        if Path::new(BUILD_FILE).exists() {
+            command.build_file = true;
         }
         return command;
     }

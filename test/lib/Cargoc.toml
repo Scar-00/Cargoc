@@ -1,0 +1,6 @@
+[package]
+name = "lib"
+typ = "staticlib"
+
+[lib]
+header = ["."]
