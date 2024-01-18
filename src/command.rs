@@ -14,6 +14,8 @@ pub mod Command {
 
     #[cfg(target_os = "windows")]
     static SYSYEM_LIBS: &str = "-lshell32 -ladvapi32 -lcfgmgr32 -lcomctl32 -lcomdlg32 -ld2d1 -ldwrite -ldxgi -lgdi32 -lkernel32 -lmsimg32 -lole32 -lopengl32 -lshlwapi -luser32 -lwindowscodecs -lwinspool -luserenv -lws2_32 -lbcrypt -lmsvcrt -loleaut32 -luuid -lodbc32 -lodbccp32";
+    #[cfg(target_os = "linux")]
+    static SYSYEM_LIBS: &str = "";
 
     static BUILD_FILE: &str = "./build.cpp";
 
@@ -42,11 +44,12 @@ pub mod Command {
         lib: Option<Lib>,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Debug, Deserialize)]
     struct Dependency {
         path: Option<PathBuf>,
         git: Option<String>,
         version: Option<String>,
+        leaky: Option<bool>,
     }
 
     #[derive(Deserialize)]
@@ -101,6 +104,16 @@ pub mod Command {
             return command;
         }
 
+        fn get_includes(&self) -> Vec<String> {
+            let mut includes = Vec::new();
+            self.compiler_flags.iter().for_each(|f| {
+                if f.starts_with("-I") {
+                    includes.push(f.clone());
+                }
+            });
+            return includes;
+        }
+
         fn get_compile_command_for_file(&self, file: &mut PathBuf) -> String {
             let mut cmd = String::new();
             cmd.push_str(self.compiler.as_str());
@@ -127,7 +140,7 @@ pub mod Command {
             for (i, file) in self.src.iter().enumerate() {
                 if obj[i].exists() {
                     if file.is_older(&obj[i]).unwrap() {
-                        return;
+                        continue;
                     }
                 }
                 let cmd = std::ffi::CString::new(
@@ -335,7 +348,7 @@ pub mod Command {
             }
 
             if let Some(path) = &dep.path {
-                let cfg_path = compose_path(path, &PathBuf::from("cargoc.toml"));
+                let cfg_path = compose_path(path, &PathBuf::from("Cargoc.toml"));
                 if !cfg_path.exists() {
                     println!(
                         "{}",
@@ -347,7 +360,6 @@ pub mod Command {
                     std::process::exit(1);
                 }
                 let mut cmd = get(cfg_path.to_str().unwrap());
-                //println!("src = {:#?}", cmd.src);
 
                 if cmd.typ == ProjType::bin || cmd.includes.len() < 1 {
                     println!("Cannot use non library project as a dependency and or need includes");
@@ -355,6 +367,11 @@ pub mod Command {
                 }
                 if cmd.should_rebuild() {
                     cmd.build();
+                }
+
+                if dep.leaky.unwrap_or(false) {
+                    let mut incls: Vec<PathBuf> = cmd.includes.iter().map(|i| compose_path(path, i)).collect();
+                    self.includes.append(&mut incls);
                 }
 
                 //println!("includes -> {:#?}", cmd.includes);
@@ -365,8 +382,6 @@ pub mod Command {
                     ));
                 }
                 self.linker_flags.push(cmd.get_out_file());
-                //println!("compiler_flags -> {:#?}", self.compiler_flags);
-                //println!("linker_flags -> {:#?}", self.linker_flags);
             }
         }
     }
@@ -377,7 +392,7 @@ pub mod Command {
             let file = file?.path();
             if file.is_file() {
                 match file.extension().unwrap().to_str().unwrap() {
-                    "c" | "cpp" | "cxx" | "c++" => {
+                    "c" | "cpp" | "cxx" | "c++" | "ly" => {
                         src_files.push(file);
                     }
                     _ => {}
@@ -429,7 +444,7 @@ pub mod Command {
                         Ok(md) => {
                             if md.is_file() {
                                 match path.extension().unwrap().to_str().unwrap() {
-                                    "c" | "cpp" | "cxx" | "c++" => {
+                                    "c" | "cpp" | "cxx" | "c++" | "ly" => {
                                         command.src.push(path.to_path_buf());
                                     }
                                     _ => {}

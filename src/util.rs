@@ -1,8 +1,6 @@
 pub mod util {
-    use std::{
-        path::{Path, PathBuf, MAIN_SEPARATOR},
-        str::FromStr,
-    };
+    use std::path::PathBuf;
+
     pub trait IsOlder {
         fn is_older(&self, other: &PathBuf) -> Result<bool, std::io::Error>;
     }
@@ -19,7 +17,7 @@ pub mod util {
     pub fn compose_path<P: Into<PathBuf>>(dir: P, file: P) -> PathBuf {
         let mut dir = Into::<PathBuf>::into(dir).clone();
         dir.push(file.into());
-        return dir;
+        return dir.canonicalize().unwrap_or(dir);
         /*let path = format!(
             "{}{}{}",
             dir.into().to_str().unwrap(),
