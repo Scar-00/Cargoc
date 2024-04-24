@@ -200,14 +200,20 @@ pub mod Command {
 
                     for i in 0..self.compiler_flags.len() {
                         if i == self.compiler_flags.len() - 1 {
-                            args.push_str(
-                                format!("\"{}\"", self.compiler_flags[i].as_str()).as_str(),
-                            );
+                            args.push_str(&format!(
+                                "\"{}\"",
+                                Path::new(self.compiler_flags[i].as_str())
+                                    .to_slash()
+                                    .unwrap()
+                            ));
                             continue;
                         }
-                        args.push_str(
-                            format!("\"{}\", ", self.compiler_flags[i].as_str()).as_str(),
-                        );
+                        args.push_str(&format!(
+                            "\"{}\", ",
+                            Path::new(self.compiler_flags[i].as_str())
+                                .to_slash()
+                                .unwrap()
+                        ));
                     }
 
                     let path = self.dir.clone();
@@ -326,15 +332,12 @@ pub mod Command {
         }
 
         pub fn get_out_file(&self) -> String {
-            return format!(
-                "{}{}{}.{}",
-                compose_path(&self.dir, &PathBuf::from(&self.out_dir))
-                    .to_str()
-                    .unwrap(),
-                MAIN_SEPARATOR,
-                self.name,
-                self.typ.get_file_ext()
+            let mut path = compose_path(
+                compose_path(&self.dir, &PathBuf::from(&self.out_dir)),
+                self.name.clone().into(),
             );
+            path.set_extension(self.typ.get_file_ext());
+            return path.to_str().unwrap().to_string();
         }
 
         fn resolve_dependency(&mut self, dep: &Dependency) {
@@ -370,7 +373,8 @@ pub mod Command {
                 }
 
                 if dep.leaky.unwrap_or(false) {
-                    let mut incls: Vec<PathBuf> = cmd.includes.iter().map(|i| compose_path(path, i)).collect();
+                    let mut incls: Vec<PathBuf> =
+                        cmd.includes.iter().map(|i| compose_path(path, i)).collect();
                     self.includes.append(&mut incls);
                 }
 
